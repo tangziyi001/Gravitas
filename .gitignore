@@ -1,0 +1,5 @@
+build/
+build-release/
+compile_commands.json
+*.vst3
+*.component
