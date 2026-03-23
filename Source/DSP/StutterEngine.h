@@ -2,6 +2,30 @@
 #include <JuceHeader.h>
 #include "CircularBuffer.h"
 
+//==============================================================================
+// Stutter engine tuning constants.
+namespace StutterConst
+{
+    // Crossfade window applied at every slice boundary to prevent clicks.
+    constexpr double kCrossfadeSec     = 0.005; // 5 ms
+
+    // Hard floor on slice length in samples.  Below this we'd effectively read
+    // a single sample on repeat, which sounds like a tone rather than stutter.
+    constexpr int    kMinSliceSamples  = 64;
+
+    // Hard floor on the effective capture window passed in from the processor.
+    // Prevents divide-by-zero and pathological buffer reads.
+    constexpr int    kMinCapSamples    = 256;
+
+    // Assumes 4/4 time: one bar = 4 beats.  Used to convert ballX → slice length.
+    constexpr double kBeatsPerBar      = 4.0;
+
+    // The slice length mapping is: sliceSec = 1bar * pow(kMinSliceFraction, |ballX|).
+    // At |ballX|=0 (centre) → 1 bar.  At |ballX|=1 (edge) → 1/32 bar.
+    // 1/32 = 0.03125, which equals one thirty-second note subdivision.
+    constexpr double kMinSliceFraction = 0.03125; // 1/32 note
+}
+
 // Reads slices from a CircularBuffer and produces stutter output.
 // All methods called on the audio thread.
 class StutterEngine
@@ -13,7 +37,7 @@ public:
     {
         sr = sampleRate;
         blockSize = samplesPerBlock;
-        crossfadeSamples = static_cast<int> (sampleRate * 0.005); // 5ms
+        crossfadeSamples = static_cast<int> (sampleRate * StutterConst::kCrossfadeSec);
     }
 
     // ballX in [-1,1]: edges = tiny slices (1/32), center = 1 bar
@@ -34,15 +58,18 @@ public:
         double usedBpm = (bpm > 0.0) ? bpm : 120.0;
         double secondsPerBeat = 60.0 / usedBpm;
 
-        int effectiveCap = juce::jmax (256, juce::jmin (effectiveCapacitySamples,
-                                                         circBuf.getCapacity()));
+        int effectiveCap = juce::jmax (StutterConst::kMinCapSamples,
+                                       juce::jmin (effectiveCapacitySamples,
+                                                   circBuf.getCapacity()));
 
         // Map |ballX| → slice length in samples
         // |ballX|: 0=center(long), 1=edge(short)
         float t = std::abs (ballX);            // [0,1]
         // Exponential mapping: short slices near edges feel more intense
-        float sliceSec = static_cast<float> (secondsPerBeat * 4.0 * std::pow (0.03125, t));
-        int sliceSamples = juce::jmax (64, juce::jmin (static_cast<int> (sliceSec * sr),
+        float sliceSec = static_cast<float> (secondsPerBeat * StutterConst::kBeatsPerBar
+                                             * std::pow (StutterConst::kMinSliceFraction, t));
+        int sliceSamples = juce::jmax (StutterConst::kMinSliceSamples,
+                                       juce::jmin (static_cast<int> (sliceSec * sr),
                                                          effectiveCap));
 
         if (syncToHost)

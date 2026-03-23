@@ -2,6 +2,34 @@
 #include <JuceHeader.h>
 #include "PlanetPresets.h"
 
+//==============================================================================
+// Physics tuning constants — all chosen empirically for feel.
+// Adjust these to change how the ball moves without touching the equations.
+namespace PhysicsConst
+{
+    // Controls how quickly physics parameters (gravity, damping, wind, mass) lerp
+    // toward a new preset.  Passed as the exponent rate to exp(-dt * k).
+    // At 30 Hz (dt ≈ 0.033 s), alpha ≈ 0.125 → ~80% of the way in ~0.5 s.
+    constexpr float kParamSmooth       = 4.0f;
+
+    // Normalises the spring force so the free oscillation period is roughly 2–3 s
+    // at the default gravity of 0.45.  Derived empirically; increase to tighten.
+    constexpr float kSpringScale       = 12.0f;
+
+    // Scales the random wind impulse added to acceleration each tick.
+    // At wind = 1 the ball receives up to ±kWindImpulseScale units per axis.
+    constexpr float kWindImpulseScale  = 2.5f;
+
+    // Scales the audio-reactive kick.  At full-scale RMS = 1 the ball gets a
+    // ±kAudioKickStrength push, making loud transients visibly shake the ball.
+    constexpr float kAudioKickStrength = 3.0f;
+
+    // Coefficient of restitution on boundary walls: fraction of velocity
+    // retained after a bounce.  0.6 = 60% elastic — feels physical without
+    // the ball sticking or amplifying indefinitely.
+    constexpr float kBounceRestitution = 0.6f;
+}
+
 // Runs on the UI timer thread (never the audio thread).
 // Ball position is published to audio thread via atomics in PluginProcessor.
 class BallPhysics
@@ -38,25 +66,25 @@ public:
     void update (float dt, float audioRMS)
     {
         // Smoothly interpolate toward target planet params
-        float alpha = 1.0f - std::exp (-dt * 4.0f);
+        float alpha = 1.0f - std::exp (-dt * PhysicsConst::kParamSmooth);
         gravity  += alpha * (targetGravity  - gravity);
         damping  += alpha * (targetDamping  - damping);
         wind     += alpha * (targetWind     - wind);
         ballMass += alpha * (targetBallMass - ballMass);
 
         // Spring force toward center — scaled so oscillation period is ~2-3s
-        float ax = -gravity * state.x / ballMass * 12.0f;
-        float ay = -gravity * state.y / ballMass * 12.0f;
+        float ax = -gravity * state.x / ballMass * PhysicsConst::kSpringScale;
+        float ay = -gravity * state.y / ballMass * PhysicsConst::kSpringScale;
 
         // Random wind impulses
         if (wind > 0.001f)
         {
-            ax += wind * (random.nextFloat() * 2.0f - 1.0f) * 2.5f;
-            ay += wind * (random.nextFloat() * 2.0f - 1.0f) * 2.5f;
+            ax += wind * (random.nextFloat() * 2.0f - 1.0f) * PhysicsConst::kWindImpulseScale;
+            ay += wind * (random.nextFloat() * 2.0f - 1.0f) * PhysicsConst::kWindImpulseScale;
         }
 
         // Audio-reactive kick — louder input = bigger shove
-        float kickStrength = audioRMS * 3.0f;
+        float kickStrength = audioRMS * PhysicsConst::kAudioKickStrength;
         ax += kickStrength * (random.nextFloat() * 2.0f - 1.0f);
         ay += kickStrength * (random.nextFloat() * 2.0f - 1.0f);
 
@@ -70,10 +98,10 @@ public:
         state.y += state.vy * dt;
 
         // Elastic boundary [-1, 1]
-        if (state.x >  1.0f) { state.x =  1.0f; state.vx *= -0.6f; }
-        if (state.x < -1.0f) { state.x = -1.0f; state.vx *= -0.6f; }
-        if (state.y >  1.0f) { state.y =  1.0f; state.vy *= -0.6f; }
-        if (state.y < -1.0f) { state.y = -1.0f; state.vy *= -0.6f; }
+        if (state.x >  1.0f) { state.x =  1.0f; state.vx *= -PhysicsConst::kBounceRestitution; }
+        if (state.x < -1.0f) { state.x = -1.0f; state.vx *= -PhysicsConst::kBounceRestitution; }
+        if (state.y >  1.0f) { state.y =  1.0f; state.vy *= -PhysicsConst::kBounceRestitution; }
+        if (state.y < -1.0f) { state.y = -1.0f; state.vy *= -PhysicsConst::kBounceRestitution; }
     }
 
     // Returns position with axes swapped if planet requires it (Uranus)

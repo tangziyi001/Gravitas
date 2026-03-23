@@ -1,6 +1,36 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+//==============================================================================
+// DSP / processor tuning constants
+namespace
+{
+    // BPM used when no DAW playhead is available (standalone, offline render).
+    constexpr double kFallbackBpm     = 120.0;
+
+    // Must match the maximum of the "bufferBars" parameter range in createParameterLayout().
+    // The circular buffer is always allocated at this size so Capture Bars can be
+    // changed at runtime without reallocation.
+    constexpr int    kMaxBufferBars   = 8;
+
+    // Assumes 4/4 time: one bar = 4 beats.
+    constexpr double kBeatsPerBar     = 4.0;
+
+    // Maximum echo delay line length.  At 60 BPM with echoSpacing=1.0 and 8 taps,
+    // the last tap lands at 8 beats = 8 s — well within this ceiling for any
+    // musical tempo.  Increase if you add longer spacings.
+    constexpr double kMaxEchoDelaySec = 2.0;
+
+    // Maps the saturation parameter [0, 1] to a tanh drive value [1, 9].
+    // drive = 1 + saturation * kSatDriveScale
+    // At drive=1 tanh is nearly linear; at drive=9 the signal is heavily clipped.
+    constexpr float  kSatDriveScale   = 8.0f;
+
+    // Reported tail length: how long the plugin continues to produce audio after
+    // the input goes silent (reverb decay + echo feedback settling time).
+    constexpr float  kTailLengthSec   = 2.0f;
+}
+
 GravitasAudioProcessor::GravitasAudioProcessor()
     : AudioProcessor (BusesProperties()
                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
@@ -61,14 +91,14 @@ GravitasAudioProcessor::createParameterLayout()
 //==============================================================================
 void GravitasAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Always allocate max capacity (8 bars) so bufferBars can be changed at runtime
-    double bpm = 120.0;
+    // Always allocate max capacity (kMaxBufferBars) so bufferBars can be changed at runtime
+    double bpm = kFallbackBpm;
     if (auto* ph = getPlayHead())
     {
         if (auto pos = ph->getPosition())
             if (auto b = pos->getBpm()) bpm = *b;
     }
-    int maxBufferSamples = static_cast<int> (sampleRate * (60.0 / bpm) * 4.0 * 8);
+    int maxBufferSamples = static_cast<int> (sampleRate * (60.0 / bpm) * kBeatsPerBar * kMaxBufferBars);
     circularBuffer.prepare (2, maxBufferSamples);
     stutterEngine.prepare (sampleRate, samplesPerBlock);
 
@@ -85,7 +115,7 @@ void GravitasAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
         return std::tanh (x); // soft-clip
     };
 
-    int maxDelaySamples = static_cast<int> (sampleRate * 2.0);
+    int maxDelaySamples = static_cast<int> (sampleRate * kMaxEchoDelaySec);
     for (auto& line : echoLines)
     {
         line.setMaximumDelayInSamples (maxDelaySamples); // must be before prepare
@@ -122,7 +152,7 @@ void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     circularBuffer.write (buffer, buffer.getNumSamples());
 
     // Read params
-    double bpm = 120.0;
+    double bpm = kFallbackBpm;
     bool   hostSynced = false;
     if (auto* ph = getPlayHead())
     {
@@ -139,7 +169,7 @@ void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     // Compute effective buffer window from bufferBars param (runtime, no realloc needed)
     int   bars    = juce::roundToInt (apvts.getRawParameterValue ("bufferBars")->load());
-    int   effectiveCapacity = static_cast<int> (getSampleRate() * (60.0 / bpm) * 4.0 * bars);
+    int   effectiveCapacity = static_cast<int> (getSampleRate() * (60.0 / bpm) * kBeatsPerBar * bars);
 
     // --- Stutter ---
     stutterEngine.process (buffer, circularBuffer, bx, by, bpm, sync, rev, effectiveCapacity);
@@ -161,7 +191,7 @@ void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         rp.wetLevel   = *apvts.getRawParameterValue ("reverbWet");
         float decayVal = static_cast<float> (*apvts.getRawParameterValue ("reverbDecay"));
         rp.roomSize   = juce::jmap (decayVal, 0.1f, 8.0f, 0.0f, 1.0f);
-        rp.damping    = 0.5f;
+        rp.damping    = 0.5f; // fixed mid-point; tonal character is controlled by reverbDecay instead
         rp.dryLevel   = 1.0f - rp.wetLevel;
         reverb.setParameters (rp);
         juce::dsp::AudioBlock<float> block (buffer);
@@ -171,7 +201,7 @@ void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     // --- Saturation ---
     {
-        float drive = 1.0f + *apvts.getRawParameterValue ("saturation") * 8.0f;
+        float drive = 1.0f + *apvts.getRawParameterValue ("saturation") * kSatDriveScale;
         for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
         {
             auto* data = buffer.getWritePointer (ch);
