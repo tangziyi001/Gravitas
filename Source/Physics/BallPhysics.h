@@ -15,7 +15,14 @@ public:
         float vy = 0.0f;
     };
 
-    BallPhysics() = default;
+    BallPhysics()
+    {
+        // Start off-center so the spring force has something to act on
+        state.x  =  0.35f;
+        state.y  =  0.15f;
+        state.vx =  0.0f;
+        state.vy =  0.2f;
+    }
 
     // Call once when preset changes; smoothly lerps params over transitionSec
     void setPlanet (const PlanetPreset& preset)
@@ -37,25 +44,26 @@ public:
         wind     += alpha * (targetWind     - wind);
         ballMass += alpha * (targetBallMass - ballMass);
 
-        // Spring force toward center (gravity)
-        float ax = -gravity * state.x / ballMass;
-        float ay = -gravity * state.y / ballMass;
+        // Spring force toward center — scaled so oscillation period is ~2-3s
+        float ax = -gravity * state.x / ballMass * 12.0f;
+        float ay = -gravity * state.y / ballMass * 12.0f;
 
         // Random wind impulses
         if (wind > 0.001f)
         {
-            ax += wind * (random.nextFloat() * 2.0f - 1.0f) * 0.08f;
-            ay += wind * (random.nextFloat() * 2.0f - 1.0f) * 0.08f;
+            ax += wind * (random.nextFloat() * 2.0f - 1.0f) * 2.5f;
+            ay += wind * (random.nextFloat() * 2.0f - 1.0f) * 2.5f;
         }
 
         // Audio-reactive kick — louder input = bigger shove
-        float kickStrength = audioRMS * 0.4f;
+        float kickStrength = audioRMS * 3.0f;
         ax += kickStrength * (random.nextFloat() * 2.0f - 1.0f);
         ay += kickStrength * (random.nextFloat() * 2.0f - 1.0f);
 
-        // Integrate velocity
-        state.vx = (state.vx + ax * dt) * (1.0f - damping * dt * 60.0f);
-        state.vy = (state.vy + ay * dt) * (1.0f - damping * dt * 60.0f);
+        // Integrate velocity — fixed damping: was multiplying by *60 which
+        // gave a negative factor (~-0.09) and killed all motion instantly
+        state.vx = (state.vx + ax * dt) * (1.0f - damping * dt);
+        state.vy = (state.vy + ay * dt) * (1.0f - damping * dt);
 
         // Integrate position
         state.x += state.vx * dt;

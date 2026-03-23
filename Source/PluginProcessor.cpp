@@ -59,15 +59,15 @@ GravitasAudioProcessor::createParameterLayout()
 //==============================================================================
 void GravitasAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    int bufferBars = static_cast<int> (*apvts.getRawParameterValue ("bufferBars"));
+    // Always allocate max capacity (8 bars) so bufferBars can be changed at runtime
     double bpm = 120.0;
     if (auto* ph = getPlayHead())
     {
         if (auto pos = ph->getPosition())
             if (auto b = pos->getBpm()) bpm = *b;
     }
-    int bufferSamples = static_cast<int> (sampleRate * (60.0 / bpm) * 4.0 * bufferBars);
-    circularBuffer.prepare (2, bufferSamples);
+    int maxBufferSamples = static_cast<int> (sampleRate * (60.0 / bpm) * 4.0 * 8);
+    circularBuffer.prepare (2, maxBufferSamples);
     stutterEngine.prepare (sampleRate, samplesPerBlock);
 
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, 2 };
@@ -135,8 +135,12 @@ void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     bool  sync    = static_cast<bool> (*apvts.getRawParameterValue ("syncToHost")) && hostSynced;
     bool  rev     = static_cast<bool> (*apvts.getRawParameterValue ("reverse"));
 
+    // Compute effective buffer window from bufferBars param (runtime, no realloc needed)
+    int   bars    = static_cast<int> (*apvts.getRawParameterValue ("bufferBars"));
+    int   effectiveCapacity = static_cast<int> (getSampleRate() * (60.0 / bpm) * 4.0 * bars);
+
     // --- Stutter ---
-    stutterEngine.process (buffer, circularBuffer, bx, by, bpm, sync, rev);
+    stutterEngine.process (buffer, circularBuffer, bx, by, bpm, sync, rev, effectiveCapacity);
 
     // --- Filter ---
     float cutoff = *apvts.getRawParameterValue ("filterCutoff");

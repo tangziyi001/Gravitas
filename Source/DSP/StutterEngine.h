@@ -19,12 +19,14 @@ public:
     // ballX in [-1,1]: edges = tiny slices (1/32), center = 1 bar
     // ballY in [-1,1]: top = 100% wet, bottom = 0% wet
     // bpm: host tempo (0 = free-running, use default 120)
+    // effectiveCapacitySamples: how far back to read (bars * samplesPerBar)
     void process (juce::AudioBuffer<float>& buffer,
                   CircularBuffer& circBuf,
                   float ballX, float ballY,
                   double bpm,
                   bool   syncToHost,
-                  bool   reverse)
+                  bool   reverse,
+                  int    effectiveCapacitySamples)
     {
         float wet   = (ballY + 1.0f) * 0.5f;   // remap [-1,1] → [0,1]
         float dry   = 1.0f - wet;
@@ -32,15 +34,19 @@ public:
         double usedBpm = (bpm > 0.0) ? bpm : 120.0;
         double secondsPerBeat = 60.0 / usedBpm;
 
+        int effectiveCap = juce::jmax (256, juce::jmin (effectiveCapacitySamples,
+                                                         circBuf.getCapacity()));
+
         // Map |ballX| → slice length in samples
         // |ballX|: 0=center(long), 1=edge(short)
         float t = std::abs (ballX);            // [0,1]
         // Exponential mapping: short slices near edges feel more intense
         float sliceSec = static_cast<float> (secondsPerBeat * 4.0 * std::pow (0.03125, t));
-        int sliceSamples = juce::jmax (64, static_cast<int> (sliceSec * sr));
+        int sliceSamples = juce::jmax (64, juce::jmin (static_cast<int> (sliceSec * sr),
+                                                         effectiveCap));
 
         if (syncToHost)
-            sliceSamples = snapToGrid (sliceSamples, secondsPerBeat);
+            sliceSamples = juce::jmin (snapToGrid (sliceSamples, secondsPerBeat), effectiveCap);
 
         // If slice changed, start new slice from current write head position
         if (sliceSamples != currentSliceSamples)

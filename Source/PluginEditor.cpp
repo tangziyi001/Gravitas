@@ -37,6 +37,7 @@ GravitasAudioProcessorEditor::GravitasAudioProcessorEditor (GravitasAudioProcess
     addRow ("Atmosphere",     "damping");
     addRow ("Wind",           "wind");
     addRow ("Ball Mass",      "ballMass");
+    addRow ("Capture Bars",   "bufferBars");
     addRow ("Cutoff",         "filterCutoff");
     addRow ("Resonance",      "filterRes");
     addRow ("Reverb Wet",     "reverbWet");
@@ -102,6 +103,7 @@ void GravitasAudioProcessorEditor::paint (juce::Graphics& g)
     };
 
     drawSection ("PHYSICS",              sectionYPhysics);
+    drawSection ("STUTTER",             sectionYStutter);
     drawSection ("FILTER",              sectionYFilter);
     drawSection ("REVERB",              sectionYReverb);
     drawSection ("SATURATION / TREMOLO", sectionYSatTrem);
@@ -139,29 +141,33 @@ void GravitasAudioProcessorEditor::resized()
     paramRows[2]->setBounds (nextRow());    // wind
     paramRows[3]->setBounds (nextRow());    // ballMass
 
+    // Stutter
+    sectionYStutter = sectionY();
+    paramRows[4]->setBounds (nextRow (18)); // bufferBars
+
     // Filter
     sectionYFilter = sectionY();
-    paramRows[4]->setBounds (nextRow (18));
-    paramRows[5]->setBounds (nextRow());
+    paramRows[5]->setBounds (nextRow (18)); // filterCutoff
+    paramRows[6]->setBounds (nextRow());    // filterRes
 
     // Reverb
     sectionYReverb = sectionY();
-    paramRows[6]->setBounds (nextRow (18));
-    paramRows[7]->setBounds (nextRow());
+    paramRows[7]->setBounds (nextRow (18));
+    paramRows[8]->setBounds (nextRow());
 
     // Sat / Tremolo
     sectionYSatTrem = sectionY();
-    paramRows[8]->setBounds  (nextRow (18));
-    paramRows[9]->setBounds  (nextRow());
+    paramRows[9]->setBounds  (nextRow (18));
     paramRows[10]->setBounds (nextRow());
+    paramRows[11]->setBounds (nextRow());
 
     // Echo
     sectionYEcho = sectionY();
-    paramRows[11]->setBounds (nextRow (18));
-    paramRows[12]->setBounds (nextRow());
+    paramRows[12]->setBounds (nextRow (18));
     paramRows[13]->setBounds (nextRow());
+    paramRows[14]->setBounds (nextRow());
 
     // Mix
     sectionYOutput = sectionY();
-    paramRows[14]->setBounds (nextRow (18));
+    paramRows[15]->setBounds (nextRow (18));
 }
