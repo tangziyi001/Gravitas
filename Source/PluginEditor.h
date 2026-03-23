@@ -260,7 +260,7 @@ private:
             float scale = 0.06f + t * 0.82f;
 
             float windBreath = currentWind * 0.20f
-                               * std::sin (windPhase * juce::MathConstants<float>::twoPi * 1.1f
+                               * std::sin (windPhase * juce::MathConstants<float>::twoPi
                                            + (float) i * 1.05f);
             scale = juce::jlimit (0.04f, 0.95f, scale + windBreath);
 
@@ -286,7 +286,7 @@ private:
             float baseAngle  = (float) i / (float) numLines * juce::MathConstants<float>::twoPi;
             // Angular turbulence: at wind=1, lines deviate up to ±27°
             float turbulence = currentWind * 0.47f
-                               * std::sin (windPhase * juce::MathConstants<float>::twoPi * 2.1f
+                               * std::sin (windPhase * juce::MathConstants<float>::twoPi * 2.0f
                                            + (float) i * 1.57f);
             float angle = baseAngle + turbulence;
             float cosA  = std::cos (angle);
@@ -304,7 +304,7 @@ private:
 
                 // Perpendicular bow: at wind=1, max bow ~50px at mid-radius
                 float bow = currentWind * 50.0f * fMid * (1.0f - fMid)
-                            * std::sin (windPhase * juce::MathConstants<float>::twoPi * 1.9f
+                            * std::sin (windPhase * juce::MathConstants<float>::twoPi * 2.0f
                                         + (float)(i * 3 + d) * 0.7f);
 
                 float x1 = cx + cosA * rx * fA + (-sinA) * bow;
