@@ -250,23 +250,32 @@ private:
         int   numRings  = 1 + static_cast<int> (currentGravity * 9.0f);   // 1..10
         float baseAlpha = 0.12f + currentGravity * 0.72f;                  // 0.12..0.84
 
+        // Ring colour: interpolate toward white so it always contrasts
+        // against the planet texture (pure planet colour blends in)
+        auto ringColour = currentColour.interpolatedWith (juce::Colours::white, 0.55f);
+
         for (int i = 1; i <= numRings; ++i)
         {
             float t     = (float) i / (float) numRings;
-            float scale = 0.06f + t * 0.82f;   // first ring near center, last near edge
+            float scale = 0.06f + t * 0.82f;
 
-            // Wind breathes rings in/out — amplitude is large enough to clearly see
             float windBreath = currentWind * 0.20f
                                * std::sin (windPhase * juce::MathConstants<float>::twoPi * 1.1f
                                            + (float) i * 1.05f);
             scale = juce::jlimit (0.04f, 0.95f, scale + windBreath);
 
-            float alpha = baseAlpha * (1.0f - t * 0.65f);
-            float thick = 2.5f - t * 1.5f;
+            float alpha = baseAlpha * (1.0f - t * 0.60f);
+            float thick = 3.0f - t * 1.5f;
 
             float erx = rx * scale;
             float ery = ry * scale;
-            g.setColour (currentColour.withAlpha (alpha));
+
+            // Dark shadow stroke → ensures contrast on bright planet textures
+            g.setColour (juce::Colours::black.withAlpha (alpha * 0.5f));
+            g.drawEllipse (cx - erx, cy - ery, erx * 2.0f, ery * 2.0f, thick + 2.0f);
+
+            // Bright ring on top
+            g.setColour (ringColour.withAlpha (alpha));
             g.drawEllipse (cx - erx, cy - ery, erx * 2.0f, ery * 2.0f, thick);
         }
 

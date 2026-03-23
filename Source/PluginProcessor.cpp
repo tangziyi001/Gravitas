@@ -28,7 +28,9 @@ GravitasAudioProcessor::createParameterLayout()
     // Stutter
     params.push_back (std::make_unique<juce::AudioParameterBool>  ("syncToHost",    "Sync to Host",  true));
     params.push_back (std::make_unique<juce::AudioParameterBool>  ("reverse",       "Reverse",       false));
-    params.push_back (std::make_unique<juce::AudioParameterInt>   ("bufferBars",    "Buffer Bars",   1, 8, 2));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (
+        "bufferBars", "Buffer Bars",
+        juce::NormalisableRange<float> (1.0f, 8.0f, 1.0f), 2.0f));
 
     // Filter
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("filterCutoff",  "Filter Cutoff", 200.0f, 18000.0f, 4000.0f));
@@ -136,7 +138,7 @@ void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     bool  rev     = static_cast<bool> (*apvts.getRawParameterValue ("reverse"));
 
     // Compute effective buffer window from bufferBars param (runtime, no realloc needed)
-    int   bars    = static_cast<int> (*apvts.getRawParameterValue ("bufferBars"));
+    int   bars    = juce::roundToInt (apvts.getRawParameterValue ("bufferBars")->load());
     int   effectiveCapacity = static_cast<int> (getSampleRate() * (60.0 / bpm) * 4.0 * bars);
 
     // --- Stutter ---
