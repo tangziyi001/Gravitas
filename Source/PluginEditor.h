@@ -20,18 +20,11 @@ namespace VisualConst
     constexpr float kFieldScale           = 0.85f;
 
     // ── Ball core rendering ──────────────────────────────────────────────────
+    // Ball radius (px) = kBallBaseRadius * massScale, where
     // massScale = kMassBase + ballMass * kMassGain  →  range [1.15, 1.6] across [0.1, 2.0]
+    constexpr float kBallBaseRadius       = 10.0f;
     constexpr float kMassBase             = 0.7f;
     constexpr float kMassGain             = 0.45f;
-
-    // Motion-blur stretch: length = (kStretchLenBase + speed * kStretchLenSpeed) * massScale
-    constexpr float kStretchLenBase       = 14.0f; // px at rest
-    constexpr float kStretchLenSpeed      = 22.0f; // px per unit speed
-
-    // Width shrinks as speed increases (squash-and-stretch).  Clamped to kStretchWidMin.
-    constexpr float kStretchWidBase       = 14.0f;
-    constexpr float kStretchWidSpeed      =  5.0f;
-    constexpr float kStretchWidMin        =  7.0f; // keeps the ball visible when fast
 
     // ── Ball glow layers ─────────────────────────────────────────────────────
     constexpr float kGlowRadBase          = 36.0f; // outer glow radius at rest (px)
@@ -150,10 +143,6 @@ namespace VisualConst
 
     // ── Ball specular highlight ──────────────────────────────────────────────
     // Small bright ellipse offset from ball centre to simulate surface highlight.
-    constexpr float kSpecularOffX         = 3.5f;  // px left of ball centre
-    constexpr float kSpecularOffY         = 5.0f;  // px above ball centre
-    constexpr float kSpecularW            = 6.0f;
-    constexpr float kSpecularH            = 5.0f;
 
     // ── Field contour rendering details ──────────────────────────────────────
     // Shadow stroke is drawn at half the ring alpha to ensure contrast on bright textures.
@@ -174,8 +163,6 @@ namespace VisualConst
     constexpr float kHaloBrighter         = 0.4f;  // brighter() factor for inner halo colour
     constexpr float kHaloAlpha            = 0.75f;
     constexpr float kBallCoreBrighter     = 0.8f;  // brighter() factor for the ball core fill
-    constexpr float kBallStrokeAlpha      = 0.55f; // alpha of the white outline ring
-    constexpr float kSpecularAlpha        = 0.95f; // near-white specular highlight
 
     // ── Atmospheric fog rendering ────────────────────────────────────────────
     constexpr float kFogDarkenAmount      = 0.5f;  // darker() factor applied to fog colour
@@ -400,30 +387,12 @@ public:
             g.fillEllipse (bx - haloR, by - haloR, haloR * 2.0f, haloR * 2.0f);
         }
 
-        // ── Ball core — stretched in direction of travel ───────────────────
+        // ── Ball core ──────────────────────────────────────────────────────
         {
-            // Heavier ball = visually larger core
-            float massScale  = VisualConst::kMassBase + currentBallMass * VisualConst::kMassGain;
-            float stretchLen = (VisualConst::kStretchLenBase + spd * VisualConst::kStretchLenSpeed) * massScale;
-            float stretchW   = juce::jmax (VisualConst::kStretchWidMin,
-                                           (VisualConst::kStretchWidBase - spd * VisualConst::kStretchWidSpeed) * massScale);
-            float angle      = std::atan2 (s.vy, s.vx);
-
-            juce::Path ballPath;
-            ballPath.addEllipse (-stretchLen * 0.5f, -stretchW * 0.5f, stretchLen, stretchW);
-            juce::AffineTransform xform = juce::AffineTransform::rotation (angle)
-                                          .translated (bx, by);
+            float massScale = VisualConst::kMassBase + currentBallMass * VisualConst::kMassGain;
+            float r         = VisualConst::kBallBaseRadius * massScale;
             g.setColour (currentColour.brighter (VisualConst::kBallCoreBrighter));
-            g.fillPath (ballPath, xform);
-
-            // Outer white ring for crisp edge
-            g.setColour (juce::Colours::white.withAlpha (VisualConst::kBallStrokeAlpha));
-            g.strokePath (ballPath, juce::PathStrokeType (1.5f), xform);
-
-            // Bright specular highlight
-            g.setColour (juce::Colours::white.withAlpha (VisualConst::kSpecularAlpha));
-            g.fillEllipse (bx - VisualConst::kSpecularOffX, by - VisualConst::kSpecularOffY,
-                           VisualConst::kSpecularW, VisualConst::kSpecularH);
+            g.fillEllipse (bx - r, by - r, r * 2.0f, r * 2.0f);
         }
 
         // ── Physics HUD — tiny readouts so slider changes are undeniable ───
