@@ -1,37 +1,56 @@
 #pragma once
 #include <JuceHeader.h>
+#include <limits>
 #include "CircularBuffer.h"
 
 //==============================================================================
 // Stutter engine tuning constants.
 namespace StutterConst
 {
-    // Crossfade window applied at every slice boundary to prevent clicks.
-    constexpr double kCrossfadeSec     = 0.005; // 5 ms
+    // Crossfade window applied at every cycle boundary to prevent clicks.
+    constexpr double kCrossfadeSec      = 0.005; // 5 ms
 
-    // Hard floor on slice length in samples.  Below this we'd effectively read
-    // a single sample on repeat, which sounds like a tone rather than stutter.
-    constexpr int    kMinSliceSamples  = 64;
+    // Hard floor on the repeat interval in samples.
+    constexpr int    kMinIntervalSamples = 64;
 
     // Hard floor on the effective capture window passed in from the processor.
-    // Prevents divide-by-zero and pathological buffer reads.
-    constexpr int    kMinCapSamples    = 256;
+    constexpr int    kMinCapSamples     = 256;
 
-    // Assumes 4/4 time: one bar = 4 beats.  Used to convert ballX → slice length.
-    constexpr double kBeatsPerBar      = 4.0;
+    // Assumes 4/4 time: one bar = 4 beats.
+    constexpr double kBeatsPerBar       = 4.0;
 
-    // The slice length mapping is: sliceSec = 1bar * pow(kMinSliceFraction, |ballX|).
-    // At |ballX|=0 (centre) → 1 bar.  At |ballX|=1 (edge) → 1/32 bar.
-    // 1/32 = 0.03125, which equals one thirty-second note subdivision.
-    constexpr double kMinSliceFraction = 0.03125; // 1/32 note
+    // Repeat interval mapping: interval = 1bar * pow(kMinIntervalFrac, 1 - dist).
+    // At dist=0 (centre) → 1/32 bar.  At dist=1 (edge) → 1 bar.
+    // 1/32 = 0.03125 (one thirty-second note).
+    constexpr double kMinIntervalFrac   = 0.03125;
+
+    // Bandwidth (Hz) of the gain-smoothing filter.
+    // currentGain tracks distance-from-centre as its target, approaching it at a rate
+    // set by atmosphere.  Higher rate = faster response to ball movement.
+    // alpha per sample = 1 - exp(-atmosphere * kGainResponseRate / sampleRate).
+    constexpr float  kGainResponseRate  = 30.0f;
 }
 
-// Reads slices from a CircularBuffer and produces stutter output.
-// All methods called on the audio thread.
+// Stutter engine — repeat-interval model.
+//
+// The radial distance of the ball from centre controls how often the captured
+// window is restarted (centre = tight stutter, edge = plays full window once).
+// Atmosphere drives an exponential gain decay within each cycle so the repeated
+// output fades like a delay echo.  All methods run on the audio thread.
 class StutterEngine
 {
 public:
     StutterEngine() = default;
+
+    int   getWindowStart()      const { return windowStart; }
+    int   getPlayPos()          const { return playPos; }
+    int   getIntervalSamples()  const { return currentIntervalSamples; }
+    float getCurrentGain()      const { return currentGain; }
+
+    // Aliases used by PluginProcessor display atomics
+    int   getSliceStart()   const { return windowStart; }
+    int   getReadPos()      const { return playPos; }
+    int   getSliceSamples() const { return currentIntervalSamples; }
 
     void prepare (double sampleRate, int samplesPerBlock)
     {
@@ -40,100 +59,125 @@ public:
         crossfadeSamples = static_cast<int> (sampleRate * StutterConst::kCrossfadeSec);
     }
 
-    // ballX in [-1,1]: edges = tiny slices (1/32), center = 1 bar
-    // ballY in [-1,1]: top = 100% wet, bottom = 0% wet
-    // bpm: host tempo (0 = free-running, use default 120)
-    // effectiveCapacitySamples: how far back to read (bars * samplesPerBar)
+    // ballX, ballY in [-1, 1] — only radial distance is used.
+    // bpm — used to convert the interval fraction to samples (host BPM or 120 fallback).
+    // reverse — play each repeated window backwards.
+    // syncWindow — when true, each new window is snapped to the last beat boundary.
+    // beatPhaseSamples — samples since the last beat at the block start (from host ppqPosition).
+    // resetWindowSamples — how far back the window jumps on each cycle restart (resetBars × samplesPerBar).
+    // atmosphere in [0, 0.99] — gain smoothing rate; 0 = no gain change regardless of position.
+    // effectiveCapacitySamples — total capture window in samples (bufferBars × samplesPerBar);
+    //                            used to clamp the repeat interval.
     void process (juce::AudioBuffer<float>& buffer,
                   CircularBuffer& circBuf,
-                  float ballX, float ballY,
+                  float  ballX,
+                  float  ballY,
                   double bpm,
-                  bool   syncToHost,
                   bool   reverse,
+                  bool   syncWindow,
+                  int    beatPhaseSamples,
+                  int    resetWindowSamples,
+                  float  atmosphere,
                   int    effectiveCapacitySamples)
     {
-        float wet   = (ballY + 1.0f) * 0.5f;   // remap [-1,1] → [0,1]
-        float dry   = 1.0f - wet;
+        const int numSamples  = buffer.getNumSamples();
+        const int numChannels = buffer.getNumChannels();
 
-        double usedBpm = (bpm > 0.0) ? bpm : 120.0;
-        double secondsPerBeat = 60.0 / usedBpm;
+        const double usedBpm        = (bpm > 0.0) ? bpm : 120.0;
+        const double secondsPerBeat = 60.0 / usedBpm;
 
-        int effectiveCap = juce::jmax (StutterConst::kMinCapSamples,
-                                       juce::jmin (effectiveCapacitySamples,
-                                                   circBuf.getCapacity()));
+        const int cap = juce::jmax (StutterConst::kMinCapSamples,
+                                    juce::jmin (effectiveCapacitySamples,
+                                                circBuf.getCapacity()));
 
-        // Map |ballX| → slice length in samples
-        // |ballX|: 0=center(long), 1=edge(short)
-        float t = std::abs (ballX);            // [0,1]
-        // Exponential mapping: short slices near edges feel more intense
-        float sliceSec = static_cast<float> (secondsPerBeat * StutterConst::kBeatsPerBar
-                                             * std::pow (StutterConst::kMinSliceFraction, t));
-        int sliceSamples = juce::jmax (StutterConst::kMinSliceSamples,
-                                       juce::jmin (static_cast<int> (sliceSec * sr),
-                                                         effectiveCap));
+        // ── Repeat interval ────────────────────────────────────────────────
+        // Radial distance [0, 1]: centre → shortest interval, edge → full window.
+        const float dist = juce::jlimit (0.0f, 1.0f,
+                                          std::sqrt (ballX * ballX + ballY * ballY));
+        const float intervalSec = static_cast<float> (
+            secondsPerBeat * StutterConst::kBeatsPerBar
+            * std::pow (StutterConst::kMinIntervalFrac, 1.0f - dist));
+        // Interval is always continuous — no grid snap.  This gives the "gravity"
+        // feeling where stuttering intensifies smoothly as the ball falls inward.
+        const int newInterval = juce::jlimit (StutterConst::kMinIntervalSamples, cap,
+                                              static_cast<int> (intervalSec * sr));
 
-        if (syncToHost)
-            sliceSamples = juce::jmin (snapToGrid (sliceSamples, secondsPerBeat), effectiveCap);
+        // ── Per-sample gain smoothing ──────────────────────────────────────
+        // currentGain continuously tracks `dist` as its target.
+        // When the ball is near the centre (dist ≈ 0), gain fades toward silence.
+        // When the ball moves to the edge (dist ≈ 1), gain recovers toward unity.
+        // atmosphere=0 → alpha=0 → currentGain never moves (no effect at all).
+        // Higher atmosphere → faster response to ball position changes.
+        const float alpha = 1.0f - std::exp (
+            -atmosphere * StutterConst::kGainResponseRate / static_cast<float> (sr));
 
-        // If slice changed, start new slice from current write head position
-        if (sliceSamples != currentSliceSamples)
-        {
-            currentSliceSamples = sliceSamples;
-            sliceStart = (circBuf.getWritePos() - sliceSamples + circBuf.getCapacity())
-                         % circBuf.getCapacity();
-            readPos = 0;
-            crossfadePos = 0;
-        }
-
-        int numSamples = buffer.getNumSamples();
-        int numChannels = buffer.getNumChannels();
+        const int bufCap = circBuf.getCapacity();
 
         for (int i = 0; i < numSamples; ++i)
         {
-            // Compute read index into circular buffer
-            int sampleOffset = reverse ? (currentSliceSamples - 1 - readPos) : readPos;
-            int circIdx = (sliceStart + sampleOffset) % circBuf.getCapacity();
-
-            // Crossfade gain at slice boundaries
-            float gain = 1.0f;
-            if (readPos < crossfadeSamples)
-                gain = static_cast<float> (readPos) / crossfadeSamples;
-            else if (readPos > currentSliceSamples - crossfadeSamples)
-                gain = static_cast<float> (currentSliceSamples - readPos) / crossfadeSamples;
-
-            for (int ch = 0; ch < numChannels; ++ch)
+            // ── Window reset clock (independent of stutter cycle) ──────────
+            // Fires every resetWindowSamples — grabs the latest `cap` samples
+            // of audio and holds them until the next reset.
+            if (resetCounter >= resetWindowSamples)
             {
-                float drySample  = buffer.getSample (ch, i);
-                float wetSample  = circBuf.read (ch, circIdx) * gain;
-                buffer.setSample (ch, i, dry * drySample + wet * wetSample);
+                resetCounter = 0;
+                if (syncWindow)
+                {
+                    int lastBeatWP = ((circBuf.getWritePos() - beatPhaseSamples) % bufCap + bufCap) % bufCap;
+                    windowStart    = ((lastBeatWP - cap) % bufCap + bufCap) % bufCap;
+                }
+                else
+                {
+                    windowStart = ((circBuf.getWritePos() - cap) % bufCap + bufCap) % bufCap;
+                }
+            }
+            ++resetCounter;
+
+            // ── Stutter cycle restart ──────────────────────────────────────
+            // Loops within the fixed window; does NOT move windowStart.
+            if (playPos >= currentIntervalSamples)
+            {
+                playPos = 0;
+                currentIntervalSamples = newInterval;
+                // currentGain is NOT reset — continuous state tracking dist.
             }
 
-            // Advance read position, loop within slice
-            readPos = (readPos + 1) % currentSliceSamples;
+            // ── Smooth gain toward target (dist) ───────────────────────────
+            currentGain += alpha * (dist - currentGain);
+
+            // ── Read from circular buffer ──────────────────────────────────
+            const int sampleOffset = reverse ? (currentIntervalSamples - 1 - playPos)
+                                             : playPos;
+            const int circIdx = (windowStart + sampleOffset) % circBuf.getCapacity();
+
+            // ── Crossfade envelope at cycle boundaries (prevents clicks) ───
+            float env = currentGain;
+            if (crossfadeSamples > 0)
+            {
+                if (playPos < crossfadeSamples)
+                    env *= static_cast<float> (playPos) / static_cast<float> (crossfadeSamples);
+                else if (playPos > currentIntervalSamples - crossfadeSamples)
+                    env *= static_cast<float> (currentIntervalSamples - playPos)
+                           / static_cast<float> (crossfadeSamples);
+            }
+
+            for (int ch = 0; ch < numChannels; ++ch)
+                buffer.setSample (ch, i, circBuf.read (ch, circIdx) * env);
+
+            ++playPos;
         }
     }
 
 private:
-    // Snap slice length to nearest musical subdivision
-    int snapToGrid (int rawSamples, double secondsPerBeat) const
-    {
-        // Subdivisions: 1/32, 1/16, 1/8, 1/4, 1/2, 1 bar
-        static const float subdivisions[] = { 0.125f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
-        float rawBeats = static_cast<float> (rawSamples) / static_cast<float> (sr * secondsPerBeat);
-        float best = subdivisions[0];
-        for (float sub : subdivisions)
-        {
-            if (std::abs (sub - rawBeats) < std::abs (best - rawBeats))
-                best = sub;
-        }
-        return static_cast<int> (best * secondsPerBeat * sr);
-    }
+    double sr               = 44100.0;
+    int    blockSize        = 512;
+    int    crossfadeSamples = 220;
 
-    double sr        = 44100.0;
-    int    blockSize = 512;
-    int    crossfadeSamples    = 220;
-    int    currentSliceSamples = 4096;
-    int    sliceStart = 0;
-    int    readPos    = 0;
-    int    crossfadePos = 0;
+    int    windowStart            = 0;
+    int    playPos                = 0;
+    int    currentIntervalSamples = 4096;
+    float  currentGain            = 1.0f;
+    // Initialised to a large value so the window snaps on the very first process call
+    // rather than waiting one full reset period before producing any output.
+    int    resetCounter           = std::numeric_limits<int>::max();
 };

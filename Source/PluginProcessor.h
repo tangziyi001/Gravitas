@@ -24,7 +24,7 @@ public:
     bool   acceptsMidi()  const override { return false; }
     bool   producesMidi() const override { return false; }
     bool   isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 2.0; } // matches kTailLengthSec in .cpp
+    double getTailLengthSeconds() const override;
 
     //==============================================================================
     int  getNumPrograms()    override { return 1; }
@@ -49,13 +49,27 @@ public:
     // Atomic bridge: audio thread writes RMS, UI timer reads it
     std::atomic<float> audioRMS { 0.0f };
 
+    // Atomic bridge: audio thread writes stutter/buffer state, waveform display reads it
+    std::atomic<int>   displaySliceStart   { 0 };
+    std::atomic<int>   displayReadPos      { 0 };
+    std::atomic<int>   displaySliceSamples { 4096 };
+    std::atomic<int>   displayWritePos     { 0 };
+    std::atomic<int>   displayCapacity     { 0 };
+    // Stutter audio-state for HUD
+    std::atomic<float> displayGain        { 1.0f }; // current output gain [0,1]
+    std::atomic<int>   displayIntervalMs  { 0 };    // current stutter interval in ms
+
+    // Read-only access to the circular buffer for waveform display (UI thread)
+    const CircularBuffer& getCircularBuffer() const { return circularBuffer; }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    CircularBuffer circularBuffer;
-    StutterEngine  stutterEngine;
+    CircularBuffer            circularBuffer;
+    StutterEngine             stutterEngine;
+    juce::AudioBuffer<float>  dryBuffer; // pre-processing copy for dry/wet blend
 
     // DSP processors
     juce::dsp::StateVariableTPTFilter<float> svFilter;

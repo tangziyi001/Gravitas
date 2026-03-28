@@ -28,7 +28,8 @@ namespace
 
     // Reported tail length: how long the plugin continues to produce audio after
     // the input goes silent (reverb decay + echo feedback settling time).
-    constexpr float  kTailLengthSec   = 2.0f;
+    // Also used in GravitasAudioProcessor::getTailLengthSeconds() in the header.
+    constexpr double kTailLengthSec   = 2.0;
 }
 
 GravitasAudioProcessor::GravitasAudioProcessor()
@@ -56,11 +57,14 @@ GravitasAudioProcessor::createParameterLayout()
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("ballMass",      "Ball Mass",     0.1f,  2.0f,  1.0f));
 
     // Stutter
-    params.push_back (std::make_unique<juce::AudioParameterBool>  ("syncToHost",    "Sync to Host",  true));
+    params.push_back (std::make_unique<juce::AudioParameterBool>  ("syncWindow",    "Sync Window",   false));
     params.push_back (std::make_unique<juce::AudioParameterBool>  ("reverse",       "Reverse",       false));
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         "bufferBars", "Buffer Bars",
         juce::NormalisableRange<float> (1.0f, 8.0f, 1.0f), 2.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (
+        "resetBars", "Reset Bars",
+        juce::NormalisableRange<float> (1.0f, 8.0f, 1.0f), 1.0f));
 
     // Filter
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("filterCutoff",  "Filter Cutoff", 200.0f, 18000.0f, 4000.0f));
@@ -101,6 +105,7 @@ void GravitasAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     int maxBufferSamples = static_cast<int> (sampleRate * (60.0 / bpm) * kBeatsPerBar * kMaxBufferBars);
     circularBuffer.prepare (2, maxBufferSamples);
     stutterEngine.prepare (sampleRate, samplesPerBlock);
+    dryBuffer.setSize (2, samplesPerBlock, false, true, true);
 
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, 2 };
 
@@ -127,6 +132,8 @@ void GravitasAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 
 void GravitasAudioProcessor::releaseResources() {}
 
+double GravitasAudioProcessor::getTailLengthSeconds() const { return kTailLengthSec; }
+
 //==============================================================================
 void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                             juce::MidiBuffer&)
@@ -148,31 +155,67 @@ void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     rms /= juce::jmax (1, totalNumInputChannels);
     audioRMS.store (rms, std::memory_order_relaxed);
 
+    // Save dry signal before any processing for the final dry/wet blend
+    dryBuffer.setSize (buffer.getNumChannels(), buffer.getNumSamples(), false, false, true);
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        dryBuffer.copyFrom (ch, 0, buffer, ch, 0, buffer.getNumSamples());
+
     // Record into circular buffer
     circularBuffer.write (buffer, buffer.getNumSamples());
 
     // Read params
     double bpm = kFallbackBpm;
-    bool   hostSynced = false;
     if (auto* ph = getPlayHead())
-    {
         if (auto pos = ph->getPosition())
-        {
-            if (auto b = pos->getBpm()) { bpm = *b; hostSynced = true; }
-        }
-    }
+            if (auto b = pos->getBpm()) bpm = *b;
 
-    float bx      = ballX.load (std::memory_order_relaxed);
-    float by      = ballY.load (std::memory_order_relaxed);
-    bool  sync    = static_cast<bool> (*apvts.getRawParameterValue ("syncToHost")) && hostSynced;
+    float bx  = ballX.load (std::memory_order_relaxed);
+    float by  = ballY.load (std::memory_order_relaxed);
     bool  rev     = static_cast<bool> (*apvts.getRawParameterValue ("reverse"));
+    bool  syncWin = static_cast<bool> (*apvts.getRawParameterValue ("syncWindow"));
 
     // Compute effective buffer window from bufferBars param (runtime, no realloc needed)
     int   bars    = juce::roundToInt (apvts.getRawParameterValue ("bufferBars")->load());
     int   effectiveCapacity = static_cast<int> (getSampleRate() * (60.0 / bpm) * kBeatsPerBar * bars);
 
+    // Compute how many samples into the current beat we are at the block start.
+    // When syncWindow=true, the stutter engine uses this to snap each new window
+    // to the most recent beat boundary in the circular buffer.
+    int beatPhaseSamples = 0;
+    if (syncWin)
+    {
+        if (auto* ph = getPlayHead())
+            if (auto pos = ph->getPosition())
+                if (auto ppq = pos->getPpqPosition())
+                {
+                    double beatFrac = std::fmod (*ppq, 1.0);
+                    if (beatFrac < 0.0) beatFrac += 1.0;
+                    beatPhaseSamples = static_cast<int> (beatFrac * getSampleRate() * 60.0 / bpm);
+                }
+    }
+
+    // How far back the window jumps on each cycle restart (independent of total capture size).
+    // Clamped to effectiveCapacity so it can never exceed what is actually buffered.
+    int resetBars_   = juce::roundToInt (apvts.getRawParameterValue ("resetBars")->load());
+    int resetWindowSamples = juce::jmin (
+        static_cast<int> (getSampleRate() * (60.0 / bpm) * kBeatsPerBar * resetBars_),
+        effectiveCapacity);
+
     // --- Stutter ---
-    stutterEngine.process (buffer, circularBuffer, bx, by, bpm, sync, rev, effectiveCapacity);
+    // Atmosphere (damping) doubles as the gain-decay rate: high atmosphere = fast fade.
+    float atmo = *apvts.getRawParameterValue ("damping");
+    stutterEngine.process (buffer, circularBuffer, bx, by, bpm, rev, syncWin, beatPhaseSamples,
+                           resetWindowSamples, atmo, effectiveCapacity);
+
+    // Snapshot stutter state for waveform display (UI thread reads these)
+    displaySliceStart  .store (stutterEngine.getSliceStart(),   std::memory_order_relaxed);
+    displayReadPos     .store (stutterEngine.getReadPos(),      std::memory_order_relaxed);
+    displaySliceSamples.store (effectiveCapacity,               std::memory_order_relaxed);
+    displayWritePos    .store (circularBuffer.getWritePos(),    std::memory_order_relaxed);
+    displayCapacity    .store (effectiveCapacity,               std::memory_order_relaxed);
+    displayGain        .store (stutterEngine.getCurrentGain(),  std::memory_order_relaxed);
+    displayIntervalMs  .store (static_cast<int> (stutterEngine.getSliceSamples() * 1000.0 / getSampleRate()),
+                               std::memory_order_relaxed);
 
     // --- Filter ---
     float cutoff = *apvts.getRawParameterValue ("filterCutoff");
@@ -250,9 +293,15 @@ void GravitasAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
     }
 
-    // --- Final mix (already blended in stutter, but apply overall mix) ---
+    // --- Dry/wet blend ---
     float mix = *apvts.getRawParameterValue ("mix");
-    buffer.applyGain (mix);
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        auto* wet = buffer.getWritePointer (ch);
+        auto* dry = dryBuffer.getReadPointer (ch);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+            wet[i] = dry[i] * (1.0f - mix) + wet[i] * mix;
+    }
 }
 
 //==============================================================================

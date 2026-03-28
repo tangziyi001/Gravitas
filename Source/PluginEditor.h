@@ -190,6 +190,53 @@ namespace VisualConst
 }
 
 //==============================================================================
+// UI layout constants — all pixel dimensions for the editor window.
+namespace UILayoutConst
+{
+    constexpr int   kEditorWidth        = 960;
+    constexpr int   kEditorHeight       = 700;
+
+    // Header strip (planet selector buttons)
+    constexpr int   kHeaderHeight       = 48;
+
+    // Bottom status bar
+    constexpr int   kBottomBarHeight    = 40;
+
+    // Left panel — planet field + waveform strip
+    constexpr int   kFieldWidth         = 640;
+    constexpr int   kFieldY             = kHeaderHeight;   // 48
+    constexpr int   kFieldHeight        = 512;
+    constexpr int   kWaveformY          = kFieldY + kFieldHeight; // 560
+    constexpr int   kWaveformHeight     = 100;
+
+    // Divider between left panel and right param panel
+    constexpr int   kDividerX           = kFieldWidth;     // 640
+
+    // Right param panel
+    constexpr int   kParamPanelX        = 648;  // kDividerX + 8 px breathing room
+    constexpr int   kParamPanelStartY   = 72;   // kHeaderHeight + 24 px padding
+    constexpr int   kParamPanelWidth    = 300;
+    constexpr int   kParamRowHeight     = 22;
+    constexpr int   kParamRowGap        = 2;
+    constexpr int   kSectionSpacing     = 18;   // extra top pad before each section header
+    constexpr int   kSectionLabelHeight = 16;
+    constexpr float kSectionLineEndX    = static_cast<float> (kParamPanelX + kParamPanelWidth + 4); // 952
+
+    // "GRAVITAS" title text (right-aligned in header)
+    constexpr int   kTitleWidth         = 130;
+    constexpr int   kTitleRightPad      = 10;
+    constexpr float kTitleFontSize      = 18.0f;
+
+    // Colours / alpha values used in the editor chrome
+    constexpr float kBtnDarkerFactor    = 0.3f;  // pressed planet button: darker()
+    constexpr float kBtnTextOffAlpha    = 0.6f;  // unselected button text opacity
+    constexpr float kParamLabelAlpha    = 0.75f; // ParamRow and ToggleButton label
+    constexpr float kDividerLineAlpha   = 0.08f; // vertical divider stroke
+    constexpr float kSectionLabelAlpha  = 0.7f;  // section header text
+    constexpr float kSectionLineAlpha   = 0.1f;  // section underline
+}
+
+//==============================================================================
 // Renders the 2D planet field + animated ball
 class PlanetFieldComponent : public juce::Component,
                               public juce::Timer
@@ -395,13 +442,17 @@ public:
             g.fillEllipse (bx - r, by - r, r * 2.0f, r * 2.0f);
         }
 
-        // ── Physics HUD — tiny readouts so slider changes are undeniable ───
+        // ── Audio-state HUD — shows what the stutter engine is actually doing ─
         {
-            auto fmt = [] (float v) { return juce::String (v, 2); };
-            juce::String hud = "G:" + fmt (currentGravity)
-                             + "  D:" + fmt (currentDamping)
-                             + "  W:" + fmt (currentWind)
-                             + "  M:" + fmt (currentBallMass);
+            auto ballState = physics.getState();
+            float dist = juce::jmin (1.0f, std::sqrt (ballState.x * ballState.x + ballState.y * ballState.y));
+            float gain = proc.displayGain      .load (std::memory_order_relaxed);
+            int   ivlMs = proc.displayIntervalMs.load (std::memory_order_relaxed);
+
+            juce::String hud = "dist:"  + juce::String (dist,  2)
+                             + "  ivl:" + juce::String (ivlMs) + "ms"
+                             + "  gain:" + juce::String (gain, 2);
+
             g.setFont (juce::FontOptions (VisualConst::kHudFontSize));
             int hudW = VisualConst::kHudWidth;
             int hudH = VisualConst::kHudHeight;
@@ -524,7 +575,7 @@ private:
             { BinaryData::uranus_jpg,  BinaryData::uranus_jpgSize  },
             { BinaryData::neptune_jpg, BinaryData::neptune_jpgSize },
         };
-        if (planetIndex < 0 || planetIndex >= 8) return;
+        if (planetIndex < 0 || planetIndex >= Planets::Count) return;
         const auto& e = entries[planetIndex];
         juce::MemoryInputStream stream (e.data, (size_t) e.size, false);
         surfaceTexture = juce::ImageFileFormat::loadFrom (stream);
@@ -532,7 +583,7 @@ private:
 
     GravitasAudioProcessor& proc;
     BallPhysics physics;
-    juce::Colour currentColour { juce::Colour (0xff4a90d9) };
+    juce::Colour currentColour { Planets::All[2].colour }; // Earth default
     juce::Image  surfaceTexture;
     int          currentPlanetIndex { 2 };
 
@@ -592,6 +643,102 @@ private:
 };
 
 //==============================================================================
+// Shows the circular buffer waveform, current slice region, and live playhead.
+// Reads stutter state from PluginProcessor atomics; safe to call on UI thread.
+class WaveformDisplay : public juce::Component,
+                        public juce::Timer
+{
+public:
+    WaveformDisplay (GravitasAudioProcessor& p) : proc (p)
+    {
+        startTimerHz (30);
+    }
+
+    void setPlanet (int index)
+    {
+        currentColour = Planets::All[index].colour;
+        repaint();
+    }
+
+    void timerCallback() override { repaint(); }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        float w = bounds.getWidth();
+        float h = bounds.getHeight();
+        float mid = h * 0.5f;
+
+        // ── Background ────────────────────────────────────────────────────
+        g.fillAll (juce::Colour (0xff0d0d1a));
+
+        // ── Thin top border ────────────────────────────────────────────────
+        g.setColour (juce::Colours::white.withAlpha (0.08f));
+        g.drawHorizontalLine (0, 0.0f, w);
+
+        // Snapshot atomics (all reads happen on UI timer thread)
+        int cap        = proc.displayCapacity    .load (std::memory_order_relaxed);
+        int writePos   = proc.displayWritePos    .load (std::memory_order_relaxed);
+        int sliceStart = proc.displaySliceStart  .load (std::memory_order_relaxed);
+        int sliceSamps = proc.displaySliceSamples.load (std::memory_order_relaxed);
+        int readPos    = proc.displayReadPos     .load (std::memory_order_relaxed);
+
+        if (cap <= 0) return; // buffer not yet prepared
+
+        const auto& circ = proc.getCircularBuffer();
+        int windowStart = ((writePos - cap) % cap + cap) % cap;
+
+        // ── Waveform ──────────────────────────────────────────────────────
+        // Sample one value per display pixel (sufficient resolution at 640px).
+        juce::Path wave;
+        bool started = false;
+        for (int px = 0; px < (int) w; ++px)
+        {
+            int sampleOffset = (int) ((float) px / w * (float) cap);
+            int samplePos    = (windowStart + sampleOffset) % cap;
+            float s          = circ.read (0, samplePos);
+            float y          = mid - s * mid * 0.85f; // leave a little headroom
+
+            if (!started) { wave.startNewSubPath ((float) px, y); started = true; }
+            else          { wave.lineTo           ((float) px, y); }
+        }
+        g.setColour (currentColour.withAlpha (0.55f));
+        g.strokePath (wave, juce::PathStrokeType (1.0f));
+
+        // ── Slice region highlight ─────────────────────────────────────────
+        int sliceOffsetInWindow = ((sliceStart - windowStart) % cap + cap) % cap;
+        float sliceX0 = (float) sliceOffsetInWindow / (float) cap * w;
+        float sliceX1 = sliceX0 + (float) sliceSamps / (float) cap * w;
+        sliceX0 = juce::jlimit (0.0f, w, sliceX0);
+        sliceX1 = juce::jlimit (0.0f, w, sliceX1);
+
+        if (sliceX1 > sliceX0)
+        {
+            g.setColour (currentColour.withAlpha (0.15f));
+            g.fillRect  (sliceX0, 0.0f, sliceX1 - sliceX0, h);
+
+            // Slice boundary lines
+            g.setColour (currentColour.withAlpha (0.45f));
+            g.drawVerticalLine ((int) sliceX0, 0.0f, h);
+            g.drawVerticalLine ((int) sliceX1, 0.0f, h);
+        }
+
+        // ── Playhead ──────────────────────────────────────────────────────
+        float headX = sliceX0 + (float) readPos / (float) juce::jmax (1, sliceSamps)
+                                * (sliceX1 - sliceX0);
+        headX = juce::jlimit (0.0f, w - 1.0f, headX);
+        g.setColour (juce::Colours::white.withAlpha (0.85f));
+        g.drawVerticalLine ((int) headX, 0.0f, h);
+    }
+
+private:
+    GravitasAudioProcessor& proc;
+    juce::Colour currentColour { Planets::All[2].colour }; // Earth default
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaveformDisplay)
+};
+
+//==============================================================================
 class GravitasAudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
@@ -610,8 +757,15 @@ private:
     // Field
     PlanetFieldComponent planetField;
 
+    // Waveform strip
+    WaveformDisplay waveformDisplay;
+
     // Parameter rows
     std::vector<std::unique_ptr<ParamRow>> paramRows;
+
+    // Stutter section toggle
+    juce::ToggleButton syncWindowBtn { "Sync Window to Beat" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> syncWindowAttachment;
 
     void selectPlanet (int index);
     int selectedPlanet = 2; // Earth
